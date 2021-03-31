@@ -1,56 +1,103 @@
-const db = require('../db');
-const uuid = require('uuid')
-const format = require('pg-format')
+const uuid = require('uuid');
 const ApiError = require('../error/ApiError');
+let users = require('../data/users');
+const { querySchema, bodySchemaForCreate, bodySchemaForUpdate } = require('../schemas/userSchema');
 
 class UserController {
-  async createUser(req, res) {
-    const {
-      login,
-      password,
-      age,
-    } = req.body;
+    async createUser(req, res) {
+        try {
+            await bodySchemaForCreate.validateAsync(req.body);
 
-    const newUser = await db.query(
-      `INSERT INTO users(id, login, password, age) values($1, $2, $3, $4) RETURNING *`,
-      [
-        uuid.v4(),
-        login,
-        password,
-        age
-      ]
-    );
+            const createNewUser = ({ login, password, age }) => ({
+                id: uuid.v4(),
+                login,
+                password,
+                age,
+                isdeleted: false
+            });
 
-    res.json(newUser.rows[0]);
-  }
-  async getUsers(req, res) {
-    const users = await db.query('SELECT * FROM users');
-    res.json({ users: users.rows, count: users.rowCount });
-  }
-  async getUserById(req, res) {
-    const id = req.params.id;
-    const user = await db.query('SELECT * FROM users WHERE id = $1', [id]);
-    res.json(user.rows[0]);
-  }
-  async updateUser(req, res, next) {
-    try {
-      const id = req.params.id
-      const updatedString = Object.keys(req.body).map((value, key) => `${value} = $${key + 1}`)
-      const user = await db.query(
-        format(`UPDATE users SET %s WHERE id = $${updatedString.length + 1} RETURNING *`, updatedString.join(', ')),
-        [...Object.values(req.body), id]
-      );
-      res.json(user.rows[0]);
+            const newUser = createNewUser(req.body);
 
-    } catch (e) {
-      res.json(ApiError.badRequest(e.message))
+            const isLoginExists = users.filter(user => user.login === newUser.login);
+            if (isLoginExists.length) {
+                return res.json({ message: 'login should be unique' });
+            }
+
+            users.push(newUser);
+
+            res.json(newUser);
+        } catch (err) {
+            res.status(400).json(ApiError.badRequest(err.details[0].message));
+        }
     }
-  }
-  // async deleteUser(req, res) {
-  //   const id = req.params.id;
-  //   const user = await db.query('UPDATE users SET isdeleted = $1 FROM users WHERE id = $2', [id, isdeleted])
-  //   res.json(user.rows)
-  // }
+
+    async getUsers(req, res) {
+        try {
+            await querySchema.validateAsync(req.query);
+
+            const { limit, sort, loginSubstring } = req.query;
+
+            const getAutoSuggestUsers = () => {
+                const num = sort === 'desc' ? 1 : -1;
+
+                const filteredUsersList = users.filter(user => loginSubstring ? user.login.includes(loginSubstring) : true);
+
+                const sortedUsersList = filteredUsersList.sort((a, b) => {
+                    const loginA = a.login.toLowerCase();
+                    const loginB = b.login.toLowerCase();
+                    if (loginA < loginB) return num;
+                    if (loginA > loginB) return -num;
+                    return 0;
+                });
+
+                const newUsersList = limit ? sortedUsersList.slice(0, limit) : sortedUsersList;
+
+                return { users: newUsersList, count: newUsersList.length };
+            };
+
+            res.json(getAutoSuggestUsers(loginSubstring, limit));
+        } catch (err) {
+            res.status(400).json(ApiError.badRequest(err.details[0].message));
+        }
+    }
+
+    async getUserById(req, res) {
+        const id = req.params.id;
+        const currentUser = users.filter(user => user.id === id);
+        res.json(currentUser);
+    }
+    async updateUser(req, res) {
+        try {
+            await bodySchemaForUpdate.validateAsync(req.body);
+
+            const id = req.params.id;
+            const currentUser = users.filter(user => user.id === id);
+            users = users.filter(user => user.id !== id);
+
+            if (req.method === 'DELETE') {
+                if (currentUser[0].isdeleted === true) {
+                    return res.status(400).json(ApiError.badRequest('user not found'));
+                }
+
+                const deletedUser = {
+                    ...currentUser[0],
+                    isdeleted: true
+                };
+
+                users.push(deletedUser);
+                return res.json(deletedUser);
+            }
+
+            const updatedUser = {
+                ...currentUser[0],
+                ...req.body
+            };
+            users.push(updatedUser);
+            res.json(updatedUser);
+        } catch (err) {
+            res.status(400).json(ApiError.badRequest(err.details[0].message));
+        }
+    }
 }
 
 module.exports = new UserController();
